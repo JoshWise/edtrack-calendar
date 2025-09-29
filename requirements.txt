@@ -1,0 +1,40 @@
+# EdTrack Calendar Module Dependencies
+
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Web Scraping
+playwright==1.40.0
+
+# Data Processing
+pandas>=2.0
+numpy>=1.24.0
+
+# Database
+sqlalchemy>=2.0
+psycopg2-binary
+python-dotenv==1.0.0
+
+# HTTP Requests
+requests==2.31.0
+httpx==0.25.0
+
+# File Processing
+python-docx==0.8.11
+PyPDF2==3.0.1
+
+# Date/Time Processing
+python-dateutil>=2.8.2
+
+# JSON Processing
+pydantic>=2.0
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+
+# Development
+black==23.11.0
+flake8==6.1.0
+mypy==1.7.0
