@@ -7,7 +7,8 @@ from various educational websites, returning data in EdTrack-compatible format.
 
 import pandas as pd
 import asyncio
-from playwright.async_api import async_playwright
+import requests
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import re
 import json
@@ -18,21 +19,19 @@ class EdTrackCalendarScraper:
     """Main scraper class for extracting lesson and calendar data"""
     
     def __init__(self):
-        self.browser = None
-        self.page = None
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
         
     async def __aenter__(self):
         """Async context manager entry"""
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=True)
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
-        if self.browser:
-            await self.browser.close()
-        if hasattr(self, 'playwright'):
-            await self.playwright.stop()
+        if self.session:
+            self.session.close()
 
     async def scrape_lesson_content(self, url: str, class_id: int) -> pd.DataFrame:
         """
@@ -45,162 +44,67 @@ class EdTrackCalendarScraper:
         Returns:
             DataFrame with lesson data compatible with EdTrack schema
         """
-        if not self.browser:
-            raise RuntimeError("Scraper not initialized. Use async context manager.")
-            
-        page = await self.browser.new_page()
-        
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            # Fetch the webpage
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
             
-            # Wait for content to load
-            await page.wait_for_timeout(2000)
+            # Parse HTML
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Extract lesson data based on common curriculum website patterns
-            lessons_data = await page.evaluate("""
-                () => {
-                    const lessons = [];
-                    let lessonNumber = 1;
-                    
-                    // Common lesson selectors for educational websites
-                    const lessonSelectors = [
-                        '.lesson', '.assignment', '.activity', '.module', 
-                        '.chapter', '.unit', '.topic', '[data-lesson]',
-                        '.course-item', '.curriculum-item', '.lesson-item'
-                    ];
-                    
-                    // Try each selector pattern
-                    for (const selector of lessonSelectors) {
-                        const elements = document.querySelectorAll(selector);
+            lessons_data = []
+            lesson_number = 1
+            
+            # Common lesson selectors for educational websites
+            lesson_selectors = [
+                '.lesson', '.assignment', '.activity', '.module', 
+                '.chapter', '.unit', '.topic', '[data-lesson]',
+                '.course-item', '.curriculum-item', '.lesson-item'
+            ]
+            
+            # Try each selector pattern
+            for selector in lesson_selectors:
+                elements = soup.select(selector)
+                
+                if elements:
+                    for element in elements:
+                        # Extract title
+                        title_elem = element.find(['h1', 'h2', 'h3', 'h4', '.title', '.name', '.lesson-title'])
+                        title = title_elem.get_text().strip() if title_elem else element.get_text().strip().split('\n')[0]
                         
-                        if (elements.length > 0) {
-                            elements.forEach((el, index) => {
-                                const title = el.querySelector('h1, h2, h3, h4, .title, .name, .lesson-title')?.textContent?.trim() || 
-                                           el.textContent?.trim().split('\\n')[0] || 
-                                           `Lesson ${lessonNumber}`;
-                                
-                                const content = el.textContent?.trim() || '';
-                                const description = el.querySelector('.description, .summary, .overview')?.textContent?.trim() || '';
-                                
-                                // Extract duration information
-                                const durationInfo = extractDurationInfo(content + ' ' + description);
-                                
-                                // Extract objectives/standards
-                                const objectives = extractObjectives(content + ' ' + description);
-                                
-                                lessons.push({
-                                    lesson_number: lessonNumber,
-                                    title: title,
-                                    description: description,
-                                    content: content,
-                                    duration_hours: durationInfo.duration_hours,
-                                    duration_type: durationInfo.duration_type,
-                                    sequence_number: durationInfo.sequence_number,
-                                    total_sequence: durationInfo.total_sequence,
-                                    objectives: objectives,
-                                    source_url: window.location.href,
-                                    element_selector: selector
-                                });
-                                
-                                lessonNumber++;
-                            });
-                            break; // Use first successful selector
-                        }
-                    }
+                        if not title:
+                            title = f"Lesson {lesson_number}"
+                        
+                        # Extract content
+                        content = element.get_text().strip()
+                        
+                        # Extract description
+                        desc_elem = element.find(['.description', '.summary', '.overview'])
+                        description = desc_elem.get_text().strip() if desc_elem else ''
+                        
+                        # Extract duration information
+                        duration_info = self._extract_duration_info(content + ' ' + description)
+                        
+                        # Extract objectives
+                        objectives = self._extract_objectives(content + ' ' + description)
+                        
+                        lessons_data.append({
+                            'lesson_number': lesson_number,
+                            'title': title,
+                            'description': description,
+                            'content': content,
+                            'duration_hours': duration_info['duration_hours'],
+                            'duration_type': duration_info['duration_type'],
+                            'sequence_number': duration_info['sequence_number'],
+                            'total_sequence': duration_info['total_sequence'],
+                            'objectives': objectives,
+                            'source_url': url,
+                            'element_selector': selector
+                        })
+                        
+                        lesson_number += 1
                     
-                    // Helper function to extract duration information
-                    function extractDurationInfo(text) {
-                        const durationPatterns = [
-                            // Sequential patterns: (1 of 4), (2 of 4), etc.
-                            /(\\d+)\\s+of\\s+(\\d+)/gi,
-                            // Days: (2 days), (3 days), etc.
-                            /(\\d+)\\s+days?/gi,
-                            // Hours: (2 hours), (3 hours), etc.
-                            /(\\d+)\\s+hours?/gi,
-                            // Blocks: (4 blocks), (2 blocks), etc.
-                            /(\\d+)\\s+blocks?/gi,
-                            // Generic numbers: (2), (3), etc.
-                            /\\((\\d+)\\)/g
-                        ];
-                        
-                        for (const pattern of durationPatterns) {
-                            const match = pattern.exec(text);
-                            if (match) {
-                                const number = parseInt(match[1]);
-                                const fullMatch = match[0].toLowerCase();
-                                
-                                if (fullMatch.includes('of')) {
-                                    return {
-                                        duration_hours: parseInt(match[2]) * 1.0,
-                                        duration_type: 'sequential',
-                                        sequence_number: number,
-                                        total_sequence: parseInt(match[2])
-                                    };
-                                } else if (fullMatch.includes('day')) {
-                                    return {
-                                        duration_hours: number * 1.0,
-                                        duration_type: 'days',
-                                        sequence_number: null,
-                                        total_sequence: null
-                                    };
-                                } else if (fullMatch.includes('hour')) {
-                                    return {
-                                        duration_hours: number,
-                                        duration_type: 'hours',
-                                        sequence_number: null,
-                                        total_sequence: null
-                                    };
-                                } else if (fullMatch.includes('block')) {
-                                    return {
-                                        duration_hours: number,
-                                        duration_type: 'blocks',
-                                        sequence_number: null,
-                                        total_sequence: null
-                                    };
-                                } else {
-                                    return {
-                                        duration_hours: number,
-                                        duration_type: 'hours',
-                                        sequence_number: null,
-                                        total_sequence: null
-                                    };
-                                }
-                            }
-                        }
-                        
-                        // Default to 1 hour
-                        return {
-                            duration_hours: 1.0,
-                            duration_type: 'hours',
-                            sequence_number: null,
-                            total_sequence: null
-                        };
-                    }
-                    
-                    // Helper function to extract objectives
-                    function extractObjectives(text) {
-                        const objectives = [];
-                        const patterns = [
-                            /objective[s]?[:\s]+(.+?)(?:\n|$)/gi,
-                            /learning\s+target[s]?[:\s]+(.+?)(?:\n|$)/gi,
-                            /students?\s+will[:\s]+(.+?)(?:\n|$)/gi,
-                            /standard[s]?[:\s]+(.+?)(?:\n|$)/gi,
-                            /goal[s]?[:\s]+(.+?)(?:\n|$)/gi
-                        ];
-                        
-                        for (const pattern of patterns) {
-                            let match;
-                            while ((match = pattern.exec(text)) !== null) {
-                                objectives.push(match[1].trim());
-                            }
-                        }
-                        
-                        return objectives;
-                    }
-                    
-                    return lessons;
-                }
-            """)
+                    break  # Use first successful selector
             
             # Convert to DataFrame with EdTrack-compatible schema
             if not lessons_data:
@@ -228,8 +132,92 @@ class EdTrackCalendarScraper:
             
             return df
             
-        finally:
-            await page.close()
+        except Exception as e:
+            print(f"Error scraping lesson content: {e}")
+            return pd.DataFrame()
+    
+    def _extract_duration_info(self, text: str) -> dict:
+        """Extract duration information from text"""
+        duration_patterns = [
+            # Sequential patterns: (1 of 4), (2 of 4), etc.
+            r'(\d+)\s+of\s+(\d+)',
+            # Days: (2 days), (3 days), etc.
+            r'(\d+)\s+days?',
+            # Hours: (2 hours), (3 hours), etc.
+            r'(\d+)\s+hours?',
+            # Blocks: (4 blocks), (2 blocks), etc.
+            r'(\d+)\s+blocks?',
+            # Generic numbers: (2), (3), etc.
+            r'\((\d+)\)'
+        ]
+        
+        for pattern in duration_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                number = int(match.group(1))
+                full_match = match.group(0).lower()
+                
+                if 'of' in full_match:
+                    total = int(match.group(2))
+                    return {
+                        'duration_hours': total * 1.0,
+                        'duration_type': 'sequential',
+                        'sequence_number': number,
+                        'total_sequence': total
+                    }
+                elif 'day' in full_match:
+                    return {
+                        'duration_hours': number * 1.0,
+                        'duration_type': 'days',
+                        'sequence_number': None,
+                        'total_sequence': None
+                    }
+                elif 'hour' in full_match:
+                    return {
+                        'duration_hours': number,
+                        'duration_type': 'hours',
+                        'sequence_number': None,
+                        'total_sequence': None
+                    }
+                elif 'block' in full_match:
+                    return {
+                        'duration_hours': number,
+                        'duration_type': 'blocks',
+                        'sequence_number': None,
+                        'total_sequence': None
+                    }
+                else:
+                    return {
+                        'duration_hours': number,
+                        'duration_type': 'hours',
+                        'sequence_number': None,
+                        'total_sequence': None
+                    }
+        
+        # Default to 1 hour
+        return {
+            'duration_hours': 1.0,
+            'duration_type': 'hours',
+            'sequence_number': None,
+            'total_sequence': None
+        }
+    
+    def _extract_objectives(self, text: str) -> list:
+        """Extract objectives from text"""
+        objectives = []
+        patterns = [
+            r'objective[s]?[:\s]+(.+?)(?:\n|$)',
+            r'learning\s+target[s]?[:\s]+(.+?)(?:\n|$)',
+            r'students?\s+will[:\s]+(.+?)(?:\n|$)',
+            r'standard[s]?[:\s]+(.+?)(?:\n|$)',
+            r'goal[s]?[:\s]+(.+?)(?:\n|$)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
+            objectives.extend(matches)
+        
+        return [obj.strip() for obj in objectives if obj.strip()]
 
     async def scrape_school_calendar(self, url: str, school_id: int) -> pd.DataFrame:
         """
