@@ -92,14 +92,15 @@ async def scrape_calendar(request: ScrapeCalendarRequest):
     try:
         logger.info(f"Scraping calendar from: {request.calendar_url}")
         
-        async with EdTrackCalendarScraper() as scraper:
+        ScraperClass = get_scraper()
+        async with ScraperClass() as scraper:
             calendar_df = await scraper.scrape_school_calendar(request.calendar_url, request.school_id)
         
         if calendar_df.empty:
             raise HTTPException(status_code=404, detail="No calendar data found")
         
         # Process calendar data
-        processor = EdTrackCalendarProcessor()
+        processor = get_processor()
         processed_calendar = processor.process_calendar_data(calendar_df, request.school_id)
         
         # Analyze calendar
