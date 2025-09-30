@@ -10,7 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import re
-from calendar_models import Lesson, LearningTarget, SchoolCalendar, CalendarDay
+# Note: Processor doesn't use database models - just processes DataFrames
 
 class EdTrackCalendarProcessor:
     """Main processor class for calendar and lesson data"""

@@ -18,7 +18,8 @@ from pathlib import Path
 
 from calendar_scraper import EdTrackCalendarScraper
 from calendar_processor import EdTrackCalendarProcessor
-from calendar_models import Lesson, LearningTarget, SchoolCalendar, CalendarDay
+# Note: Calendar module is stateless - it doesn't interact with database directly
+# It just processes data and returns JSON for the main EdTrack app to use
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -92,15 +93,14 @@ async def scrape_calendar(request: ScrapeCalendarRequest):
     try:
         logger.info(f"Scraping calendar from: {request.calendar_url}")
         
-        ScraperClass = get_scraper()
-        async with ScraperClass() as scraper:
+        async with EdTrackCalendarScraper() as scraper:
             calendar_df = await scraper.scrape_school_calendar(request.calendar_url, request.school_id)
         
         if calendar_df.empty:
             raise HTTPException(status_code=404, detail="No calendar data found")
         
         # Process calendar data
-        processor = get_processor()
+        processor = EdTrackCalendarProcessor()
         processed_calendar = processor.process_calendar_data(calendar_df, request.school_id)
         
         # Analyze calendar
