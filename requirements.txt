@@ -3,6 +3,7 @@
 # Web Framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
+python-multipart==0.0.6
 
 # Web Scraping (simplified for Railway)
 requests==2.31.0
