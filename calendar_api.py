@@ -5,7 +5,7 @@ This module provides REST API endpoints for scraping curriculum content,
 processing calendar data, and integrating with the main EdTrack application.
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
@@ -13,6 +13,8 @@ import pandas as pd
 import asyncio
 from datetime import datetime
 import logging
+import io
+from pathlib import Path
 
 from calendar_scraper import EdTrackCalendarScraper
 from calendar_processor import EdTrackCalendarProcessor
@@ -75,7 +77,7 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-# Scrape school calendar only
+# Scrape school calendar from URL
 @app.post("/scrape-calendar", response_model=APIResponse)
 async def scrape_calendar(request: ScrapeCalendarRequest):
     """
@@ -116,7 +118,70 @@ async def scrape_calendar(request: ScrapeCalendarRequest):
         logger.error(f"Error scraping calendar: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to scrape calendar: {str(e)}")
 
-# Scrape lesson content only
+# Upload calendar file (CSV, Excel, etc.)
+@app.post("/upload-calendar", response_model=APIResponse)
+async def upload_calendar(
+    file: UploadFile = File(...),
+    school_id: int = Form(...)
+):
+    """
+    Upload and process a calendar file (CSV, Excel, PDF, DOCX)
+    
+    Args:
+        file: Calendar file to upload
+        school_id: School ID from EdTrack database
+        
+    Returns:
+        APIResponse with calendar data
+    """
+    try:
+        logger.info(f"Processing calendar file: {file.filename}")
+        
+        # Read file content
+        file_content = await file.read()
+        file_extension = Path(file.filename).suffix.lower()
+        
+        # Process based on file type
+        if file_extension in ['.csv', '.txt']:
+            # Read CSV file
+            calendar_df = pd.read_csv(io.BytesIO(file_content))
+        elif file_extension in ['.xlsx', '.xls']:
+            # Read Excel file
+            calendar_df = pd.read_excel(io.BytesIO(file_content))
+        elif file_extension == '.json':
+            # Read JSON file
+            calendar_df = pd.read_json(io.BytesIO(file_content))
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
+        
+        if calendar_df.empty:
+            raise HTTPException(status_code=404, detail="No calendar data found in file")
+        
+        # Add school_id if not present
+        if 'school_id' not in calendar_df.columns:
+            calendar_df['school_id'] = school_id
+        
+        # Process calendar data
+        processor = EdTrackCalendarProcessor()
+        processed_calendar = processor.process_calendar_data(calendar_df, school_id)
+        
+        # Analyze calendar
+        analysis = processor.analyze_calendar(processed_calendar)
+        
+        return APIResponse(
+            status="success",
+            message=f"Calendar file '{file.filename}' processed successfully",
+            data={
+                "calendar": processed_calendar.to_dict('records')
+            },
+            summary=analysis
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing calendar file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process calendar file: {str(e)}")
+
+# Scrape lesson content from URL
 @app.post("/scrape-lessons", response_model=APIResponse)
 async def scrape_lessons(request: ScrapeLessonsRequest):
     """
@@ -158,6 +223,83 @@ async def scrape_lessons(request: ScrapeLessonsRequest):
     except Exception as e:
         logger.error(f"Error scraping lessons: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to scrape lessons: {str(e)}")
+
+# Upload lesson file (CSV, Excel, PDF, DOCX)
+@app.post("/upload-lessons", response_model=APIResponse)
+async def upload_lessons(
+    file: UploadFile = File(...),
+    class_id: int = Form(...)
+):
+    """
+    Upload and process a lesson file (CSV, Excel, PDF, DOCX)
+    
+    Args:
+        file: Lesson file to upload
+        class_id: Class ID from EdTrack database
+        
+    Returns:
+        APIResponse with lesson data
+    """
+    try:
+        logger.info(f"Processing lesson file: {file.filename}")
+        
+        # Read file content
+        file_content = await file.read()
+        file_extension = Path(file.filename).suffix.lower()
+        
+        # Process based on file type
+        if file_extension in ['.csv', '.txt']:
+            # Read CSV file
+            lessons_df = pd.read_csv(io.BytesIO(file_content))
+        elif file_extension in ['.xlsx', '.xls']:
+            # Read Excel file
+            lessons_df = pd.read_excel(io.BytesIO(file_content))
+        elif file_extension == '.json':
+            # Read JSON file
+            lessons_df = pd.read_json(io.BytesIO(file_content))
+        elif file_extension in ['.pdf', '.docx', '.doc']:
+            # For PDF/DOCX, we'll extract text and create basic lesson structure
+            # This is a simplified version - you can enhance it later
+            raise HTTPException(status_code=400, detail=f"PDF/DOCX parsing not yet implemented. Please use CSV/Excel format.")
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
+        
+        if lessons_df.empty:
+            raise HTTPException(status_code=404, detail="No lesson data found in file")
+        
+        # Add class_id if not present
+        if 'class_id' not in lessons_df.columns:
+            lessons_df['class_id'] = class_id
+        
+        # Ensure required columns exist
+        if 'lesson_number' not in lessons_df.columns:
+            lessons_df['lesson_number'] = range(1, len(lessons_df) + 1)
+        if 'title' not in lessons_df.columns:
+            lessons_df['title'] = lessons_df.apply(lambda row: f"Lesson {row['lesson_number']}", axis=1)
+        if 'status' not in lessons_df.columns:
+            lessons_df['status'] = 'planned'
+        
+        # Extract learning targets
+        processor = EdTrackCalendarProcessor()
+        targets_df = processor.create_learning_targets_from_lessons(lessons_df)
+        
+        return APIResponse(
+            status="success",
+            message=f"Lesson file '{file.filename}' processed successfully",
+            data={
+                "lessons": lessons_df.to_dict('records'),
+                "targets": targets_df.to_dict('records')
+            },
+            summary={
+                "total_lessons": len(lessons_df),
+                "total_targets": len(targets_df),
+                "file_type": file_extension
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing lesson file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process lesson file: {str(e)}")
 
 # Scrape and schedule lessons with calendar
 @app.post("/scrape-and-schedule", response_model=APIResponse)
