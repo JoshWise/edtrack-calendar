@@ -19,6 +19,27 @@ class EdTrackCalendarProcessor:
         self.lessons_df = pd.DataFrame()
         self.calendar_df = pd.DataFrame()
         self.targets_df = pd.DataFrame()
+    
+    def inspect_file_structure(self, df: pd.DataFrame) -> dict:
+        """
+        Inspect the structure of an uploaded file to help with processing
+        
+        Args:
+            df: DataFrame to inspect
+            
+        Returns:
+            Dictionary with file structure information
+        """
+        return {
+            "columns": list(df.columns),
+            "shape": df.shape,
+            "dtypes": df.dtypes.to_dict(),
+            "sample_data": df.head(3).to_dict('records') if not df.empty else [],
+            "has_date_columns": any(col.lower() in ['date', 'day', 'due_date', 'assigned_date', 'created_date'] 
+                                  for col in df.columns),
+            "suggested_date_columns": [col for col in df.columns 
+                                     if col.lower() in ['date', 'day', 'due_date', 'assigned_date', 'created_date']]
+        }
         
     def process_calendar_data(self, calendar_df: pd.DataFrame, school_id: int) -> pd.DataFrame:
         """
@@ -37,11 +58,26 @@ class EdTrackCalendarProcessor:
         # Create a copy to avoid modifying original
         processed_df = calendar_df.copy()
         
+        # Check if 'date' column exists, if not try common alternatives
+        if 'date' not in processed_df.columns:
+            date_columns = ['Date', 'DATE', 'calendar_date', 'school_date', 'day', 'due_date', 'assigned_date', 'created_date']
+            for col in date_columns:
+                if col in processed_df.columns:
+                    processed_df['date'] = processed_df[col]
+                    break
+            else:
+                # If no date column found, provide detailed error message
+                available_columns = list(processed_df.columns)
+                raise ValueError(f"No date column found. Available columns: {available_columns}. Expected date columns: 'date', 'Date', 'DATE', 'calendar_date', 'school_date', 'day', 'due_date', 'assigned_date', 'created_date'")
+        
         # Standardize date format
         processed_df['date'] = pd.to_datetime(processed_df['date'], errors='coerce')
         
         # Remove rows with invalid dates
         processed_df = processed_df.dropna(subset=['date'])
+        
+        if processed_df.empty:
+            raise ValueError("No valid dates found in calendar data")
         
         # Add derived columns
         processed_df['year'] = processed_df['date'].dt.year
@@ -55,6 +91,22 @@ class EdTrackCalendarProcessor:
         
         # Determine semester
         processed_df['semester'] = self._get_semester(processed_df['date'])
+        
+        # Add school_id if not present
+        if 'school_id' not in processed_df.columns:
+            processed_df['school_id'] = school_id
+        
+        # Add default school day status if not present
+        if 'is_school_day' not in processed_df.columns:
+            # Default: weekdays are school days, weekends are not
+            processed_df['is_school_day'] = ~processed_df['is_weekend']
+        
+        # Add default day type if not present
+        if 'day_type' not in processed_df.columns:
+            processed_df['day_type'] = processed_df.apply(
+                lambda row: 'school_day' if row['is_school_day'] else 'weekend', 
+                axis=1
+            )
         
         # Sort by date
         processed_df = processed_df.sort_values('date')
