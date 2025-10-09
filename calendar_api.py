@@ -181,7 +181,7 @@ async def upload_calendar(
         APIResponse with calendar data
     """
     try:
-        logger.info(f"Processing calendar file: {file.filename}")
+        logger.info(f"Processing calendar file: {file.filename}, school_id: {school_id}, type: {type(school_id)}")
         
         # Read file content
         file_content = await file.read()
