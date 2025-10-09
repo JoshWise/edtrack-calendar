@@ -223,6 +223,57 @@ async def upload_calendar(
                     })
                 else:
                     raise HTTPException(status_code=400, detail="Could not extract calendar data from RTF file")
+        elif file_extension in ['.docx', '.doc']:
+            # Read DOCX file using python-docx
+            from docx import Document
+            from io import BytesIO
+            doc = Document(BytesIO(file_content))
+            
+            # Extract text from paragraphs and tables
+            text_content = []
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text_content.append(para.text.strip())
+            
+            # Extract data from tables if present
+            table_data = []
+            for table in doc.tables:
+                for row in table.rows:
+                    row_data = [cell.text.strip() for cell in row.cells]
+                    if any(row_data):  # Skip empty rows
+                        table_data.append(row_data)
+            
+            # Try to create DataFrame from table data
+            if table_data and len(table_data) > 1:
+                # Assume first row is header
+                calendar_df = pd.DataFrame(table_data[1:], columns=table_data[0])
+            else:
+                # Try to parse text content as CSV
+                from io import StringIO
+                full_text = '\n'.join(text_content)
+                try:
+                    calendar_df = pd.read_csv(StringIO(full_text))
+                except:
+                    raise HTTPException(status_code=400, detail="Could not extract calendar data from DOCX file. Ensure the file contains a table or CSV-formatted text.")
+        elif file_extension == '.pdf':
+            # Read PDF file using PyPDF2
+            from PyPDF2 import PdfReader
+            from io import BytesIO
+            pdf_reader = PdfReader(BytesIO(file_content))
+            
+            # Extract text from all pages
+            text_content = []
+            for page in pdf_reader.pages:
+                text_content.append(page.extract_text())
+            
+            full_text = '\n'.join(text_content)
+            
+            # Try to parse as CSV
+            from io import StringIO
+            try:
+                calendar_df = pd.read_csv(StringIO(full_text))
+            except:
+                raise HTTPException(status_code=400, detail="Could not extract calendar data from PDF file. Consider converting to CSV or Excel format.")
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
         
@@ -372,10 +423,106 @@ async def upload_lessons(
                     lessons_df = pd.read_csv(StringIO(text))
                 except:
                     raise HTTPException(status_code=400, detail="Could not extract lesson data from RTF file. Try using CSV or Excel format.")
-        elif file_extension in ['.pdf', '.docx', '.doc']:
-            # For PDF/DOCX, we'll extract text and create basic lesson structure
-            # This is a simplified version - you can enhance it later
-            raise HTTPException(status_code=400, detail=f"PDF/DOCX parsing not yet implemented. Please use CSV/Excel/JSON/RTF format.")
+        elif file_extension in ['.docx', '.doc']:
+            # Read DOCX file using python-docx
+            from docx import Document
+            from io import BytesIO
+            doc = Document(BytesIO(file_content))
+            
+            # Extract text from paragraphs
+            text_content = []
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text_content.append(para.text.strip())
+            
+            # Extract data from tables if present
+            table_data = []
+            for table in doc.tables:
+                for row in table.rows:
+                    row_data = [cell.text.strip() for cell in row.cells]
+                    if any(row_data):
+                        table_data.append(row_data)
+            
+            # Try to create DataFrame from table data first
+            if table_data and len(table_data) > 1:
+                # Assume first row might be header
+                try:
+                    lessons_df = pd.DataFrame(table_data[1:], columns=table_data[0])
+                except:
+                    lessons_df = pd.DataFrame(table_data)
+            else:
+                # Extract lessons from text using patterns
+                import re
+                full_text = '\n'.join(text_content)
+                
+                lesson_patterns = [
+                    r'(\d+\.\d+\.?\d*)[:\s]+([^\n]+)',
+                    r'Lesson (\d+)[:\s]+([^\n]+)',
+                    r'Activity (\d+\.\d+\.?\d*)[:\s]+([^\n]+)',
+                    r'LESSON (\d+)[:\s]+([^\n]+)',
+                    r'UNIT (\d+)[:\s]+([^\n]+)',
+                ]
+                
+                lessons_found = []
+                for pattern in lesson_patterns:
+                    matches = re.finditer(pattern, full_text, re.IGNORECASE)
+                    for match in matches:
+                        lesson_num = match.group(1).strip()
+                        title = match.group(2).strip()
+                        if title and len(title) > 3 and len(title) < 200:
+                            lessons_found.append({
+                                'lesson_number': lesson_num,
+                                'title': title,
+                                'class_id': class_id
+                            })
+                
+                if lessons_found:
+                    lessons_df = pd.DataFrame(lessons_found)
+                    lessons_df = lessons_df.drop_duplicates(subset=['lesson_number', 'title'])
+                else:
+                    raise HTTPException(status_code=400, detail="Could not extract lesson data from DOCX file. Ensure the file contains structured lesson information.")
+        elif file_extension == '.pdf':
+            # Read PDF file using PyPDF2
+            from PyPDF2 import PdfReader
+            from io import BytesIO
+            import re
+            
+            pdf_reader = PdfReader(BytesIO(file_content))
+            
+            # Extract text from all pages
+            text_content = []
+            for page in pdf_reader.pages:
+                text_content.append(page.extract_text())
+            
+            full_text = '\n'.join(text_content)
+            
+            # Extract lessons using patterns
+            lesson_patterns = [
+                r'(\d+\.\d+\.?\d*)[:\s]+([^\n]+)',
+                r'Lesson (\d+)[:\s]+([^\n]+)',
+                r'Activity (\d+\.\d+\.?\d*)[:\s]+([^\n]+)',
+                r'LESSON (\d+)[:\s]+([^\n]+)',
+                r'UNIT (\d+)[:\s]+([^\n]+)',
+            ]
+            
+            lessons_found = []
+            for pattern in lesson_patterns:
+                matches = re.finditer(pattern, full_text, re.IGNORECASE)
+                for match in matches:
+                    lesson_num = match.group(1).strip()
+                    title = match.group(2).strip()
+                    if title and len(title) > 3 and len(title) < 200:
+                        lessons_found.append({
+                            'lesson_number': lesson_num,
+                            'title': title,
+                            'class_id': class_id
+                        })
+            
+            if lessons_found:
+                lessons_df = pd.DataFrame(lessons_found)
+                lessons_df = lessons_df.drop_duplicates(subset=['lesson_number', 'title'])
+            else:
+                raise HTTPException(status_code=400, detail="Could not extract lesson data from PDF file. Consider converting to CSV or Excel format.")
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
         
