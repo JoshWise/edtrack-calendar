@@ -78,6 +78,51 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
+# Inspect file structure endpoint
+@app.post("/inspect-file", response_model=APIResponse)
+async def inspect_file(
+    file: UploadFile = File(...)
+):
+    """
+    Inspect the structure of an uploaded file to help with processing
+    
+    Args:
+        file: File to inspect
+        
+    Returns:
+        APIResponse with file structure information
+    """
+    try:
+        logger.info(f"Inspecting file structure: {file.filename}")
+        
+        # Read file content
+        file_content = await file.read()
+        file_extension = Path(file.filename).suffix.lower()
+        
+        # Process based on file type
+        if file_extension in ['.csv', '.txt']:
+            df = pd.read_csv(io.BytesIO(file_content))
+        elif file_extension in ['.xlsx', '.xls']:
+            df = pd.read_excel(io.BytesIO(file_content))
+        elif file_extension == '.json':
+            df = pd.read_json(io.BytesIO(file_content))
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
+        
+        # Inspect file structure
+        processor = EdTrackCalendarProcessor()
+        structure = processor.inspect_file_structure(df)
+        
+        return APIResponse(
+            status="success",
+            message=f"File structure inspected successfully",
+            data={"structure": structure}
+        )
+        
+    except Exception as e:
+        logger.error(f"Error inspecting file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to inspect file: {str(e)}")
+
 # Scrape school calendar from URL
 @app.post("/scrape-calendar", response_model=APIResponse)
 async def scrape_calendar(request: ScrapeCalendarRequest):
@@ -152,6 +197,32 @@ async def upload_calendar(
         elif file_extension == '.json':
             # Read JSON file
             calendar_df = pd.read_json(io.BytesIO(file_content))
+        elif file_extension == '.rtf':
+            # Read RTF file - extract text and parse
+            import re
+            rtf_text = file_content.decode('utf-8', errors='ignore')
+            # Simple RTF stripping
+            text = re.sub(r'\\[a-z]+\d*\s?', ' ', rtf_text)
+            text = re.sub(r'[{}]', '', text)
+            text = re.sub(r'\\\'[0-9a-fA-F]{2}', '', text)
+            text = re.sub(r'\s+', ' ', text)
+            
+            # Try to parse as CSV-like data from the extracted text
+            from io import StringIO
+            try:
+                calendar_df = pd.read_csv(StringIO(text))
+            except:
+                # If CSV parsing fails, try to extract structured data
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                if len(lines) > 0:
+                    # Create basic calendar structure from lines
+                    calendar_df = pd.DataFrame({
+                        'date': [],
+                        'day_type': [],
+                        'description': []
+                    })
+                else:
+                    raise HTTPException(status_code=400, detail="Could not extract calendar data from RTF file")
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
         
@@ -258,10 +329,53 @@ async def upload_lessons(
         elif file_extension == '.json':
             # Read JSON file
             lessons_df = pd.read_json(io.BytesIO(file_content))
+        elif file_extension == '.rtf':
+            # Read RTF file - extract lesson structure
+            import re
+            rtf_text = file_content.decode('utf-8', errors='ignore')
+            # Simple RTF stripping
+            text = re.sub(r'\\[a-z]+\d*\s?', ' ', rtf_text)
+            text = re.sub(r'[{}]', '', text)
+            text = re.sub(r'\\\'[0-9a-fA-F]{2}', '', text)
+            text = re.sub(r'\s+', ' ', text)
+            
+            # Extract lesson-like patterns (numbers, titles, etc.)
+            lesson_patterns = [
+                r'(\d+\.\d+\.?\d*)[:\s]+([^\n]+)',
+                r'Lesson (\d+)[:\s]+([^\n]+)',
+                r'Activity (\d+\.\d+\.?\d*)[:\s]+([^\n]+)',
+                r'LESSON (\d+)[:\s]+([^\n]+)',
+                r'UNIT (\d+)[:\s]+([^\n]+)',
+            ]
+            
+            lessons_found = []
+            for pattern in lesson_patterns:
+                matches = re.finditer(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    lesson_num = match.group(1).strip()
+                    title = match.group(2).strip()
+                    if title and len(title) > 3 and len(title) < 200:
+                        lessons_found.append({
+                            'lesson_number': lesson_num,
+                            'title': title,
+                            'class_id': class_id
+                        })
+            
+            if lessons_found:
+                lessons_df = pd.DataFrame(lessons_found)
+                # Remove duplicates
+                lessons_df = lessons_df.drop_duplicates(subset=['lesson_number', 'title'])
+            else:
+                # Fallback: try CSV parsing
+                from io import StringIO
+                try:
+                    lessons_df = pd.read_csv(StringIO(text))
+                except:
+                    raise HTTPException(status_code=400, detail="Could not extract lesson data from RTF file. Try using CSV or Excel format.")
         elif file_extension in ['.pdf', '.docx', '.doc']:
             # For PDF/DOCX, we'll extract text and create basic lesson structure
             # This is a simplified version - you can enhance it later
-            raise HTTPException(status_code=400, detail=f"PDF/DOCX parsing not yet implemented. Please use CSV/Excel format.")
+            raise HTTPException(status_code=400, detail=f"PDF/DOCX parsing not yet implemented. Please use CSV/Excel/JSON/RTF format.")
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_extension}")
         
@@ -478,22 +592,33 @@ async def root():
         "docs": "/docs",
         "health": "/health",
         "endpoints": {
+            "inspect_file": "POST /inspect-file",
             "scrape_calendar": "POST /scrape-calendar",
             "scrape_lessons": "POST /scrape-lessons",
             "scrape_and_schedule": "POST /scrape-and-schedule",
             "curriculum_metadata": "POST /curriculum-metadata",
-            "process_data": "POST /process-data"
+            "process_data": "POST /process-data",
+            "upload_calendar": "POST /upload-calendar",
+            "upload_lessons": "POST /upload-lessons"
         }
     }
 
 # Error handlers
 @app.exception_handler(404)
 async def not_found_handler(request, exc):
-    return {"status": "error", "message": "Endpoint not found"}
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=404,
+        content={"status": "error", "message": "Endpoint not found"}
+    )
 
 @app.exception_handler(500)
 async def internal_error_handler(request, exc):
-    return {"status": "error", "message": "Internal server error"}
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": "Internal server error"}
+    )
 
 if __name__ == "__main__":
     import uvicorn
