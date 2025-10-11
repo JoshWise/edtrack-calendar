@@ -1,0 +1,11 @@
+# Optional dependencies for Advanced Visual Calendar Parser
+# Only install these if you need to parse color-coded district calendars
+
+opencv-python-headless==4.8.1.78
+pytesseract==0.3.10
+pdf2image==1.16.3
+
+# System dependencies (install separately):
+# - Tesseract OCR: brew install tesseract (macOS) or apt-get install tesseract-ocr (Linux)
+# - Poppler: brew install poppler (macOS) or apt-get install poppler-utils (Linux)
+

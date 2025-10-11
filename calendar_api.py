@@ -168,7 +168,8 @@ async def scrape_calendar(request: ScrapeCalendarRequest):
 @app.post("/upload-calendar", response_model=APIResponse)
 async def upload_calendar(
     file: UploadFile = File(...),
-    school_id: int = Form(...)
+    school_id: int = Form(...),
+    use_visual_parser: str = Form("false")
 ):
     """
     Upload and process a calendar file (CSV, Excel, PDF, DOCX)
@@ -181,11 +182,57 @@ async def upload_calendar(
         APIResponse with calendar data
     """
     try:
-        logger.info(f"Processing calendar file: {file.filename}, school_id: {school_id}, type: {type(school_id)}")
+        use_visual = use_visual_parser.lower() == 'true'
+        logger.info(f"Processing calendar file: {file.filename}, school_id: {school_id}, visual_parser: {use_visual}")
         
-        # Read file content
+        # Read file content first
         file_content = await file.read()
         file_extension = Path(file.filename).suffix.lower()
+        
+        # Check if visual parser is requested and available
+        if use_visual and file_extension in ['.pdf', '.png', '.jpg', '.jpeg']:
+            try:
+                from calendar_visual_parser import VisualCalendarParser, check_visual_parser_available
+                
+                available, msg = check_visual_parser_available()
+                if not available:
+                    logger.warning(f"Visual parser not available: {msg}. Falling back to text extraction.")
+                    use_visual = False
+                else:
+                    # Save file temporarily for visual parser
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                        tmp_file.write(file_content)
+                        tmp_path = tmp_file.name
+                    
+                    # Use visual parser
+                    vparser = VisualCalendarParser()
+                    df = vparser.parse_pdf_calendar(tmp_path, school_id)
+                    processed_calendar = vparser.to_edtrack_format(df)
+                    
+                    # Clean up temp file
+                    os.unlink(tmp_path)
+                    
+                    # Analyze calendar
+                    processor = EdTrackCalendarProcessor()
+                    analysis = processor.analyze_calendar(processed_calendar)
+                    
+                    return APIResponse(
+                        status="success",
+                        message=f"Calendar file '{file.filename}' processed with VISUAL parser (colors, symbols detected)",
+                        data={
+                            "calendar": processed_calendar.to_dict('records')
+                        },
+                        summary=analysis
+                    )
+            except ImportError as e:
+                logger.warning(f"Visual parser dependencies not installed: {e}. Using text extraction.")
+                use_visual = False
+            except Exception as e:
+                logger.error(f"Visual parser failed: {e}. Falling back to text extraction.")
+                use_visual = False
+        
+        # Standard text-based parsing (default or fallback)
         
         # Process based on file type
         if file_extension in ['.csv', '.txt']:
