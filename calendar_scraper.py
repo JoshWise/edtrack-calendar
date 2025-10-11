@@ -18,24 +18,106 @@ from urllib.parse import urljoin, urlparse
 class EdTrackCalendarScraper:
     """Main scraper class for extracting lesson and calendar data"""
     
-    def __init__(self):
+    def __init__(self, use_playwright: bool = False):
+        """
+        Initialize scraper
+        
+        Args:
+            use_playwright: If True, try to use Playwright for JavaScript-heavy sites
+                          If False (default), use requests/BeautifulSoup for static content
+        """
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
+        self.use_playwright = use_playwright
+        self.playwright = None
+        self.browser = None
         
     async def __aenter__(self):
         """Async context manager entry"""
+        # Only initialize Playwright if explicitly requested
+        if self.use_playwright:
+            try:
+                from playwright.async_api import async_playwright
+                self.playwright = await async_playwright().start()
+                self.browser = await self.playwright.chromium.launch(headless=True)
+            except ImportError:
+                print("Warning: Playwright not installed. Falling back to requests/BeautifulSoup.")
+                self.use_playwright = False
         return self
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
         if self.session:
             self.session.close()
+    
+    def _needs_javascript(self, url: str) -> bool:
+        """
+        Determine if a URL likely needs JavaScript/Playwright
+        
+        Args:
+            url: URL to check
+            
+        Returns:
+            True if Playwright is recommended, False if static scraping is sufficient
+        """
+        # URLs that typically need JavaScript
+        js_indicators = [
+            'classroom.google.com',
+            'canvas.instructure.com',
+            'blackboard.com',
+            'schoology.com',
+            'classroom.pltw.org',  # PLTW uses JavaScript
+            'app.',  # Most app. subdomains are SPAs
+            'portal.',  # Portals often require JS
+        ]
+        
+        url_lower = url.lower()
+        return any(indicator in url_lower for indicator in js_indicators)
+    
+    async def _scrape_with_method(self, url: str, prefer_playwright: bool = False):
+        """
+        Intelligently choose scraping method based on URL
+        
+        Args:
+            url: URL to scrape
+            prefer_playwright: Override to force Playwright
+            
+        Returns:
+            Tuple of (content, method_used)
+        """
+        # Determine best method
+        needs_js = self._needs_javascript(url) or prefer_playwright
+        
+        if needs_js and self.use_playwright and self.browser:
+            # Use Playwright for JavaScript-heavy sites
+            try:
+                page = await self.browser.new_page()
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                content = await page.content()
+                await page.close()
+                return (content, 'playwright')
+            except Exception as e:
+                print(f"Playwright failed, falling back to requests: {e}")
+                # Fall through to requests method
+        
+        # Use requests/BeautifulSoup for static content (default and fallback)
+        try:
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+            return (response.content, 'requests')
+        except Exception as e:
+            raise Exception(f"Failed to fetch URL with both methods: {e}")
 
     async def scrape_lesson_content(self, url: str, class_id: int) -> pd.DataFrame:
         """
         Scrape lesson content from curriculum websites
+        Uses intelligent method selection (requests or Playwright based on URL)
         
         Args:
             url: URL to scrape lesson content from
@@ -45,12 +127,11 @@ class EdTrackCalendarScraper:
             DataFrame with lesson data compatible with EdTrack schema
         """
         try:
-            # Fetch the webpage
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
+            # Intelligently fetch the webpage
+            content, method = await self._scrape_with_method(url)
             
             # Parse HTML
-            soup = BeautifulSoup(response.content, 'html.parser')
+            soup = BeautifulSoup(content, 'html.parser')
             
             lessons_data = []
             lesson_number = 1
@@ -218,10 +299,76 @@ class EdTrackCalendarScraper:
             objectives.extend(matches)
         
         return [obj.strip() for obj in objectives if obj.strip()]
+    
+    def _extract_date_from_element(self, element) -> Optional[str]:
+        """Extract date from an HTML element"""
+        # Try data-date attribute first
+        date_str = element.get('data-date')
+        if date_str:
+            return date_str
+        
+        # Try nested data-date
+        nested_date = element.select_one('[data-date]')
+        if nested_date:
+            return nested_date.get('data-date')
+        
+        # Try text content for date patterns
+        text = element.get_text()
+        date_patterns = [
+            r'\d{1,2}/\d{1,2}/\d{4}',  # MM/DD/YYYY
+            r'\d{4}-\d{1,2}-\d{1,2}',  # YYYY-MM-DD
+            r'\d{1,2}-\d{1,2}-\d{4}',  # MM-DD-YYYY
+            r'\d{1,2}\s+\w+\s+\d{4}'   # DD Month YYYY
+        ]
+        
+        for pattern in date_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(0)
+        
+        return None
+    
+    def _determine_school_day(self, element, title: str) -> bool:
+        """Determine if an event is a school day"""
+        no_school_keywords = [
+            'no school', 'holiday', 'break', 'vacation',
+            'closed', 'in-service', 'teacher work day',
+            'professional development'
+        ]
+        
+        # Get element classes
+        class_name = ' '.join(element.get('class', [])).lower()
+        title_lower = title.lower()
+        
+        # Check class names
+        if 'no-school' in class_name or 'holiday' in class_name or 'break' in class_name:
+            return False
+        
+        # Check title content
+        for keyword in no_school_keywords:
+            if keyword in title_lower:
+                return False
+        
+        return True
+    
+    def _determine_day_type(self, element, title: str) -> str:
+        """Determine the type of day"""
+        class_name = ' '.join(element.get('class', [])).lower()
+        title_lower = title.lower()
+        
+        if 'early' in title_lower or 'early' in class_name:
+            return 'early_release'
+        elif 'holiday' in title_lower or 'holiday' in class_name:
+            return 'holiday'
+        elif not self._determine_school_day(element, title):
+            return 'no_school'
+        else:
+            return 'regular'
 
     async def scrape_school_calendar(self, url: str, school_id: int) -> pd.DataFrame:
         """
         Scrape school calendar from district websites
+        Uses intelligent method selection (requests or Playwright based on URL)
         
         Args:
             url: URL to scrape calendar from
@@ -230,129 +377,43 @@ class EdTrackCalendarScraper:
         Returns:
             DataFrame with calendar data compatible with EdTrack schema
         """
-        if not self.browser:
-            raise RuntimeError("Scraper not initialized. Use async context manager.")
-            
-        page = await self.browser.new_page()
-        
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            # Intelligently fetch the webpage
+            content, method = await self._scrape_with_method(url)
             
-            # Wait for calendar to load
-            await page.wait_for_timeout(3000)
+            # Parse HTML
+            soup = BeautifulSoup(content, 'html.parser')
             
-            # Extract calendar data
-            calendar_data = await page.evaluate("""
-                () => {
-                    const events = [];
-                    
-                    // Common calendar selectors
-                    const calendarSelectors = [
-                        '.calendar-event', '.school-day', '.event', 
-                        '.calendar-day', '.day-event', '[data-date]',
-                        '.calendar-item', '.event-item', '.school-event'
-                    ];
-                    
-                    // Try different calendar formats
-                    for (const selector of calendarSelectors) {
-                        const elements = document.querySelectorAll(selector);
-                        
-                        if (elements.length > 0) {
-                            elements.forEach(el => {
-                                // Extract date from various formats
-                                const dateStr = extractDate(el);
-                                if (dateStr) {
-                                    const title = el.textContent?.trim() || '';
-                                    const isSchoolDay = determineSchoolDay(el, title);
-                                    const dayType = determineDayType(el, title);
-                                    
-                                    events.push({
-                                        date: dateStr,
-                                        title: title,
-                                        is_school_day: isSchoolDay,
-                                        day_type: dayType,
-                                        notes: title
-                                    });
-                                }
-                            });
-                            break; // Use first successful selector
-                        }
-                    }
-                    
-                    // Helper function to extract date
-                    function extractDate(element) {
-                        // Try data-date attribute first
-                        let dateStr = element.getAttribute('data-date');
-                        if (dateStr) return dateStr;
-                        
-                        // Try nested data-date
-                        const nestedDate = element.querySelector('[data-date]');
-                        if (nestedDate) return nestedDate.getAttribute('data-date');
-                        
-                        // Try text content for date patterns
-                        const text = element.textContent || '';
-                        const datePatterns = [
-                            /\\d{1,2}\\/\\d{1,2}\\/\\d{4}/,  // MM/DD/YYYY
-                            /\\d{4}-\\d{1,2}-\\d{1,2}/,      // YYYY-MM-DD
-                            /\\d{1,2}-\\d{1,2}-\\d{4}/,      // MM-DD-YYYY
-                            /\\d{1,2}\\s+\\w+\\s+\\d{4}/     // DD Month YYYY
-                        ];
-                        
-                        for (const pattern of datePatterns) {
-                            const match = text.match(pattern);
-                            if (match) return match[0];
-                        }
-                        
-                        return null;
-                    }
-                    
-                    // Helper function to determine if it's a school day
-                    function determineSchoolDay(element, title) {
-                        const noSchoolKeywords = [
-                            'no school', 'holiday', 'break', 'vacation',
-                            'closed', 'in-service', 'teacher work day',
-                            'professional development'
-                        ];
-                        
-                        const className = element.className.toLowerCase();
-                        const titleLower = title.toLowerCase();
-                        
-                        // Check class names
-                        if (className.includes('no-school') || 
-                            className.includes('holiday') || 
-                            className.includes('break')) {
-                            return false;
-                        }
-                        
-                        // Check title content
-                        for (const keyword of noSchoolKeywords) {
-                            if (titleLower.includes(keyword)) {
-                                return false;
-                            }
-                        }
-                        
-                        return true;
-                    }
-                    
-                    // Helper function to determine day type
-                    function determineDayType(element, title) {
-                        const className = element.className.toLowerCase();
-                        const titleLower = title.toLowerCase();
-                        
-                        if (titleLower.includes('early') || className.includes('early')) {
-                            return 'early_release';
-                        } else if (titleLower.includes('holiday') || className.includes('holiday')) {
-                            return 'holiday';
-                        } else if (!determineSchoolDay(element, title)) {
-                            return 'no_school';
-                        } else {
-                            return 'regular';
-                        }
-                    }
-                    
-                    return events;
-                }
-            """)
+            calendar_data = []
+            
+            # Common calendar selectors
+            calendar_selectors = [
+                '.calendar-event', '.school-day', '.event', 
+                '.calendar-day', '.day-event', '[data-date]',
+                '.calendar-item', '.event-item', '.school-event'
+            ]
+            
+            # Try each selector pattern
+            for selector in calendar_selectors:
+                elements = soup.select(selector)
+                
+                if elements:
+                    for element in elements:
+                        # Extract date
+                        date_str = self._extract_date_from_element(element)
+                        if date_str:
+                            title = element.get_text().strip()
+                            is_school_day = self._determine_school_day(element, title)
+                            day_type = self._determine_day_type(element, title)
+                            
+                            calendar_data.append({
+                                'date': date_str,
+                                'title': title,
+                                'is_school_day': is_school_day,
+                                'day_type': day_type,
+                                'notes': title
+                            })
+                    break  # Use first successful selector
             
             # Convert to DataFrame with EdTrack-compatible schema
             if not calendar_data:
@@ -379,6 +440,7 @@ class EdTrackCalendarScraper:
     async def scrape_curriculum_metadata(self, url: str) -> Dict[str, Any]:
         """
         Scrape metadata about curriculum content
+        Uses intelligent method selection (requests or Playwright based on URL)
         
         Args:
             url: URL to scrape metadata from
@@ -386,86 +448,80 @@ class EdTrackCalendarScraper:
         Returns:
             Dictionary with curriculum metadata
         """
-        if not self.browser:
-            raise RuntimeError("Scraper not initialized. Use async context manager.")
-            
-        page = await self.browser.new_page()
-        
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            # Intelligently fetch the webpage
+            content, method = await self._scrape_with_method(url)
             
-            metadata = await page.evaluate("""
-                () => {
-                    return {
-                        title: document.title,
-                        description: document.querySelector('meta[name="description"]')?.getAttribute('content') || '',
-                        curriculum_type: extractCurriculumType(),
-                        grade_levels: extractGradeLevels(),
-                        subject_areas: extractSubjectAreas(),
-                        total_lessons: document.querySelectorAll('.lesson, .assignment, .activity, .module').length,
-                        last_updated: extractLastUpdated(),
-                        url: window.location.href
-                    };
-                }
-                
-                function extractCurriculumType() {
-                    const title = document.title.toLowerCase();
-                    if (title.includes('pltw')) return 'PLTW';
-                    if (title.includes('ap')) return 'AP';
-                    if (title.includes('ib')) return 'IB';
-                    return 'Custom';
-                }
-                
-                function extractGradeLevels() {
-                    const text = document.body.textContent.toLowerCase();
-                    const grades = [];
-                    const gradePattern = /grade\\s+(\\d+)|(\\d+)th\\s+grade/gi;
-                    let match;
-                    while ((match = gradePattern.exec(text)) !== null) {
-                        grades.push(match[1] || match[2]);
-                    }
-                    return [...new Set(grades)];
-                }
-                
-                function extractSubjectAreas() {
-                    const text = document.body.textContent.toLowerCase();
-                    const subjects = [];
-                    const subjectKeywords = [
-                        'computer science', 'programming', 'coding', 'cybersecurity',
-                        'engineering', 'mathematics', 'science', 'technology'
-                    ];
-                    
-                    for (const keyword of subjectKeywords) {
-                        if (text.includes(keyword)) {
-                            subjects.push(keyword);
-                        }
-                    }
-                    
-                    return subjects;
-                }
-                
-                function extractLastUpdated() {
-                    // Try to find last updated date
-                    const updateSelectors = [
-                        '.last-updated', '.updated', '.modified', 
-                        '[data-updated]', '.date-modified'
-                    ];
-                    
-                    for (const selector of updateSelectors) {
-                        const element = document.querySelector(selector);
-                        if (element) {
-                            return element.textContent.trim();
-                        }
-                    }
-                    
-                    return null;
-                }
-            """)
+            # Parse HTML
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Extract metadata using BeautifulSoup
+            title = soup.title.string if soup.title else ''
+            description_tag = soup.find('meta', attrs={'name': 'description'})
+            description = description_tag.get('content', '') if description_tag else ''
+            
+            # Extract curriculum type
+            title_lower = title.lower()
+            if 'pltw' in title_lower:
+                curriculum_type = 'PLTW'
+            elif 'ap' in title_lower:
+                curriculum_type = 'AP'
+            elif 'ib' in title_lower:
+                curriculum_type = 'IB'
+            else:
+                curriculum_type = 'Custom'
+            
+            # Extract grade levels
+            body_text = soup.get_text().lower()
+            grade_pattern = r'grade\s+(\d+)|(\d+)th\s+grade'
+            grade_matches = re.findall(grade_pattern, body_text, re.IGNORECASE)
+            grade_levels = list(set([m[0] or m[1] for m in grade_matches if m[0] or m[1]]))
+            
+            # Extract subject areas
+            subject_keywords = [
+                'computer science', 'programming', 'coding', 'cybersecurity',
+                'engineering', 'mathematics', 'science', 'technology'
+            ]
+            subject_areas = [kw for kw in subject_keywords if kw in body_text]
+            
+            # Count total lessons
+            lesson_selectors = ['.lesson', '.assignment', '.activity', '.module']
+            total_lessons = sum(len(soup.select(sel)) for sel in lesson_selectors)
+            
+            # Try to find last updated date
+            update_selectors = ['.last-updated', '.updated', '.modified', '[data-updated]', '.date-modified']
+            last_updated = None
+            for selector in update_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    last_updated = element.get_text().strip()
+                    break
+            
+            metadata = {
+                'title': title,
+                'description': description,
+                'curriculum_type': curriculum_type,
+                'grade_levels': grade_levels,
+                'subject_areas': subject_areas,
+                'total_lessons': total_lessons,
+                'last_updated': last_updated,
+                'url': url
+            }
             
             return metadata
             
-        finally:
-            await page.close()
+        except Exception as e:
+            return {
+                'title': '',
+                'description': '',
+                'curriculum_type': 'Unknown',
+                'grade_levels': [],
+                'subject_areas': [],
+                'total_lessons': 0,
+                'last_updated': None,
+                'url': url,
+                'error': str(e)
+            }
 
 # Utility functions for standalone use
 async def scrape_lesson_content(url: str, class_id: int) -> pd.DataFrame:
