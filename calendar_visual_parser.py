@@ -107,54 +107,100 @@ class VisualCalendarParser:
         return images
     
     def _find_calendar_grid(self, img: np.ndarray) -> Tuple[List[List[Tuple]], Tuple]:
-        """Detect calendar grid cells using contour detection"""
+        """
+        Detect calendar grid cells using contour detection
+        Supports both single-month and year-view (multi-month) calendars
+        """
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        h, w = img.shape[:2]
+        
+        # Try adaptive threshold approach
         thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                        cv2.THRESH_BINARY_INV, 21, 10)
         
-        # Close to join grid lines
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 3))
-        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        # For year-view calendars, use a different strategy
+        # Divide the page into a grid of month sections
+        # Typical year calendar: 3 or 4 columns x 3 or 4 rows of months
         
-        # Find contours
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Detect if this is a year-view by looking for multiple month patterns
+        text_sample = ""
+        try:
+            import pytesseract
+            # Sample middle section to check for multiple months
+            sample_area = img[h//4:h//2, w//4:3*w//4]
+            text_sample = pytesseract.image_to_string(sample_area)
+        except:
+            pass
         
-        # Find largest rectangular contour (calendar bounding box)
-        h, w = img.shape[:2]
-        max_area = 0
-        cal_bbox = None
+        # Count how many month names appear
+        import calendar as cal_module
+        month_count = sum(1 for month_name in cal_module.month_name[1:] 
+                         if month_name.upper() in text_sample.upper())
         
-        for cnt in contours:
-            x, y, wc, hc = cv2.boundingRect(cnt)
-            area = wc * hc
-            if area > max_area and wc > w * 0.4 and hc > h * 0.4:
-                max_area = area
-                cal_bbox = (x, y, wc, hc)
+        is_year_view = month_count >= 3  # If 3+ months detected, it's a year view
         
-        if cal_bbox is None:
-            raise RuntimeError("Could not detect calendar grid. Ensure grid lines are visible.")
-        
-        x, y, wc, hc = cal_bbox
-        
-        # Split into 7 columns x 6 rows (typical calendar)
-        cols = 7
-        rows = 6
-        cell_w = wc // cols
-        cell_h = hc // rows
-        
-        cells = []
-        for r in range(rows):
-            row_cells = []
-            for c in range(cols):
-                cx = x + c * cell_w
-                cy = y + r * cell_h
-                # Small padding
-                padx = max(2, cell_w // 40)
-                pady = max(2, cell_h // 40)
-                row_cells.append((cx + padx, cy + pady, cell_w - 2*padx, cell_h - 2*pady))
-            cells.append(row_cells)
-        
-        return cells, cal_bbox
+        if is_year_view:
+            # Year-view calendar: create a simple grid covering the whole page
+            # Divide into smaller sections (assume 3x4 or 4x3 grid for 12 months)
+            # For simplicity, create a uniform grid across the page
+            cols = 21  # 3 months × 7 days
+            rows = 24  # 4 months × 6 weeks
+            
+            cell_w = w // cols
+            cell_h = h // rows
+            
+            cells = []
+            for r in range(rows):
+                row_cells = []
+                for c in range(cols):
+                    cx = c * cell_w
+                    cy = r * cell_h
+                    padx = max(1, cell_w // 20)
+                    pady = max(1, cell_h // 20)
+                    row_cells.append((cx + padx, cy + pady, cell_w - 2*padx, cell_h - 2*pady))
+                cells.append(row_cells)
+            
+            return cells, (0, 0, w, h)
+        else:
+            # Single month calendar - original logic
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 3))
+            closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+            
+            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            max_area = 0
+            cal_bbox = None
+            
+            for cnt in contours:
+                x, y, wc, hc = cv2.boundingRect(cnt)
+                area = wc * hc
+                if area > max_area and wc > w * 0.4 and hc > h * 0.4:
+                    max_area = area
+                    cal_bbox = (x, y, wc, hc)
+            
+            if cal_bbox is None:
+                raise RuntimeError("Could not detect calendar grid. Try increasing DPI or ensure grid lines are visible.")
+            
+            x, y, wc, hc = cal_bbox
+            
+            # Split into 7 columns x 6 rows (typical single month)
+            cols = 7
+            rows = 6
+            cell_w = wc // cols
+            cell_h = hc // rows
+            
+            cells = []
+            for r in range(rows):
+                row_cells = []
+                for c in range(cols):
+                    cx = x + c * cell_w
+                    cy = y + r * cell_h
+                    padx = max(2, cell_w // 40)
+                    pady = max(2, cell_h // 40)
+                    row_cells.append((cx + padx, cy + pady, cell_w - 2*padx, cell_h - 2*pady))
+                cells.append(row_cells)
+            
+            return cells, cal_bbox
     
     def _classify_bg_color(self, cell_img: np.ndarray) -> Optional[str]:
         """Classify cell background color"""
