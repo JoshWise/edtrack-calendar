@@ -14,12 +14,27 @@ import asyncio
 from datetime import datetime
 import logging
 import io
+import os
 from pathlib import Path
 
 from calendar_scraper import EdTrackCalendarScraper
 from calendar_processor import EdTrackCalendarProcessor
 # Note: Calendar module is stateless - it doesn't interact with database directly
 # It just processes data and returns JSON for the main EdTrack app to use
+
+# Helper function to convert numpy types to Python types
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif hasattr(obj, 'item'):  # numpy scalar
+        return obj.item()
+    elif hasattr(obj, 'tolist'):  # numpy array
+        return obj.tolist()
+    else:
+        return obj
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -223,7 +238,7 @@ async def upload_calendar(
                         data={
                             "calendar": processed_calendar.to_dict('records')
                         },
-                        summary=analysis
+                        summary=convert_numpy_types(analysis)
                     )
             except ImportError as e:
                 logger.warning(f"Visual parser dependencies not installed: {e}. Using text extraction.")
@@ -233,6 +248,7 @@ async def upload_calendar(
                 use_visual = False
         
         # Standard text-based parsing (default or fallback)
+        # Note: file_content already read above
         
         # Process based on file type
         if file_extension in ['.csv', '.txt']:
@@ -344,7 +360,7 @@ async def upload_calendar(
             data={
                 "calendar": processed_calendar.to_dict('records')
             },
-            summary=analysis
+            summary=convert_numpy_types(analysis)
         )
         
     except Exception as e:
