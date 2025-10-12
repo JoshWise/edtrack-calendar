@@ -172,7 +172,7 @@ async def scrape_calendar(request: ScrapeCalendarRequest):
             data={
                 "calendar": processed_calendar.to_dict('records')
             },
-            summary=analysis
+            summary=convert_numpy_types(analysis)
         )
         
     except Exception as e:
@@ -399,11 +399,11 @@ async def scrape_lessons(request: ScrapeLessonsRequest):
                 "lessons": lessons_df.to_dict('records'),
                 "targets": targets_df.to_dict('records')
             },
-            summary={
+            summary=convert_numpy_types({
                 "total_lessons": len(lessons_df),
                 "total_targets": len(targets_df),
                 "duration_types": lessons_df['duration_type'].value_counts().to_dict() if 'duration_type' in lessons_df.columns else {}
-            }
+            })
         )
         
     except Exception as e:
@@ -615,11 +615,11 @@ async def upload_lessons(
                 "lessons": lessons_df.to_dict('records'),
                 "targets": targets_df.to_dict('records')
             },
-            summary={
+            summary=convert_numpy_types({
                 "total_lessons": len(lessons_df),
                 "total_targets": len(targets_df),
                 "file_type": file_extension
-            }
+            })
         )
         
     except Exception as e:
@@ -686,7 +686,7 @@ async def scrape_and_schedule(request: ScrapeAndScheduleRequest):
                 "mappings": lesson_target_mappings.to_dict('records'),
                 "validation": validation
             },
-            summary={
+            summary=convert_numpy_types({
                 "total_lessons": len(scheduled_lessons),
                 "total_targets": len(learning_targets),
                 "school_days": calendar_analysis.get('school_days', 0),
@@ -694,7 +694,7 @@ async def scrape_and_schedule(request: ScrapeAndScheduleRequest):
                 "schedule_valid": validation.get('valid', False),
                 "warnings": validation.get('warnings', []),
                 "errors": validation.get('errors', [])
-            }
+            })
         )
         
     except Exception as e:
@@ -781,11 +781,11 @@ async def process_existing_data(request: ImportDataRequest):
                 "mappings": lesson_target_mappings.to_dict('records'),
                 "validation": validation
             },
-            summary={
+            summary=convert_numpy_types({
                 "total_lessons": len(scheduled_lessons),
                 "total_targets": len(learning_targets),
                 "schedule_valid": validation.get('valid', False)
-            }
+            })
         )
         
     except Exception as e:
